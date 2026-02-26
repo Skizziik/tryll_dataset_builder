@@ -1,6 +1,6 @@
 {
   "name": "tryll-dataset-builder-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "MCP server for building RAG knowledge base datasets. Create, manage and export structured JSON datasets via Claude Code.",
   "type": "module",
   "main": "index.js",

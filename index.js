@@ -46,14 +46,14 @@ const TOOLS = [
   // ---- Session ----
   {
     name: "connect_session",
-    description: "Connect to the Dataset Builder web app for real-time collaboration. After connecting, all operations will appear live in the browser. The user will give you a 6-character session code shown in the web app's topbar.",
+    description: "Connect to the Dataset Builder web app for real-time collaboration. After connecting, all operations will appear live in the browser. The user will give you a 6-character session code shown in the web app's topbar. Default server: https://trylljsoncreator.onrender.com",
     inputSchema: {
       type: "object",
       properties: {
-        url: { type: "string", description: "Web app URL, e.g. http://localhost:3000 or https://my-dataset-builder.com" },
         code: { type: "string", description: "6-character session code shown in the web app's topbar" },
+        url: { type: "string", description: "Web app URL. Default: https://trylljsoncreator.onrender.com. Only change if self-hosting." },
       },
-      required: ["url", "code"],
+      required: ["code"],
     },
   },
   {
@@ -440,7 +440,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         sessionWs = null;
       }
 
-      const base = args.url.replace(/\/+$/, '');
+      const base = (args.url || 'https://trylljsoncreator.onrender.com').replace(/\/+$/, '');
       const code = args.code.toUpperCase().trim();
 
       // Test the connection with a health check
