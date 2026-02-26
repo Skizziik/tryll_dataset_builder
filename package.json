@@ -1,0 +1,36 @@
+{
+  "name": "tryll-dataset-builder-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for building RAG knowledge base datasets. Create, manage and export structured JSON datasets via Claude Code.",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "tryll-dataset-builder-mcp": "index.js"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "rag",
+    "dataset",
+    "knowledge-base",
+    "claude",
+    "ai",
+    "tryll-engine"
+  ],
+  "author": "Tryll Engine",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Skizziik/tryll_dataset_builder"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.0"
+  }
+}
