@@ -501,28 +501,28 @@ async function handleRemote(name, args) {
 
   switch (name) {
     case "create_project":
-      return apiCall('POST', '/api/projects', { name: args.name, session: s });
+      return apiCall('POST', '/api/projects', { name: args.name, session: s, source: 'mcp' });
     case "list_projects":
       return apiCall('GET', '/api/projects');
     case "delete_project":
-      return apiCall('DELETE', `/api/projects/${p(args.name)}?session=${s}`);
+      return apiCall('DELETE', `/api/projects/${p(args.name)}?session=${s}&source=mcp`);
     case "get_project_stats":
       return apiCall('GET', `/api/projects/${p(args.name)}/stats`);
     case "create_category":
-      return apiCall('POST', `/api/projects/${p(args.project)}/categories`, { name: args.name, session: s });
+      return apiCall('POST', `/api/projects/${p(args.project)}/categories`, { name: args.name, session: s, source: 'mcp' });
     case "list_categories":
       return apiCall('GET', `/api/projects/${p(args.project)}/categories`);
     case "rename_category":
-      return apiCall('PUT', `/api/projects/${p(args.project)}/categories/${p(args.old_name)}`, { newName: args.new_name, session: s });
+      return apiCall('PUT', `/api/projects/${p(args.project)}/categories/${p(args.old_name)}`, { newName: args.new_name, session: s, source: 'mcp' });
     case "delete_category":
-      return apiCall('DELETE', `/api/projects/${p(args.project)}/categories/${p(args.name)}?session=${s}`);
+      return apiCall('DELETE', `/api/projects/${p(args.project)}/categories/${p(args.name)}?session=${s}&source=mcp`);
     case "add_chunk":
       return apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks`, {
-        id: args.id, text: args.text, metadata: args.metadata, session: s,
+        id: args.id, text: args.text, metadata: args.metadata, session: s, source: 'mcp',
       });
     case "bulk_add_chunks":
       return apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks/bulk`, {
-        chunks: args.chunks, session: s,
+        chunks: args.chunks, session: s, source: 'mcp',
       });
     case "get_chunk": {
       const proj = await apiCall('GET', `/api/projects/${p(args.project)}`);
@@ -537,7 +537,7 @@ async function handleRemote(name, args) {
       for (const cat of proj2.categories) {
         const ch = cat.chunks.find(c => c.id === args.id);
         if (ch) {
-          const body = { session: s };
+          const body = { session: s, source: 'mcp' };
           if (args.new_id !== undefined) body.id = args.new_id;
           if (args.text !== undefined) body.text = args.text;
           const meta = {};
@@ -558,7 +558,7 @@ async function handleRemote(name, args) {
       for (const cat of proj3.categories) {
         const ch = cat.chunks.find(c => c.id === args.id);
         if (ch) {
-          return apiCall('DELETE', `/api/projects/${p(args.project)}/categories/${cat.id}/chunks/${ch._uid}?session=${s}`);
+          return apiCall('DELETE', `/api/projects/${p(args.project)}/categories/${cat.id}/chunks/${ch._uid}?session=${s}&source=mcp`);
         }
       }
       throw new Error(`Chunk "${args.id}" not found`);
@@ -568,14 +568,14 @@ async function handleRemote(name, args) {
       for (const cat of proj4.categories) {
         const ch = cat.chunks.find(c => c.id === args.id);
         if (ch) {
-          return apiCall('POST', `/api/projects/${p(args.project)}/categories/${cat.id}/chunks/${ch._uid}/duplicate`);
+          return apiCall('POST', `/api/projects/${p(args.project)}/categories/${cat.id}/chunks/${ch._uid}/duplicate`, { source: 'mcp' });
         }
       }
       throw new Error(`Chunk "${args.id}" not found`);
     }
     case "move_chunk":
       return apiCall('POST', `/api/projects/${p(args.project)}/chunks/${p(args.id)}/move`, {
-        targetCategory: args.target_category, session: s,
+        targetCategory: args.target_category, session: s, source: 'mcp',
       });
     case "search_chunks":
       return apiCall('GET', `/api/projects/${p(args.project)}/search?q=${encodeURIComponent(args.query)}`);
@@ -589,7 +589,7 @@ async function handleRemote(name, args) {
       }
       if (!jsonData) throw new Error('Provide either "json_path" or "data" parameter');
       return apiCall('POST', `/api/projects/${p(args.project)}/import`, {
-        data: jsonData, category: args.category, session: s,
+        data: jsonData, category: args.category, session: s, source: 'mcp',
       });
     }
     case "parse_url": {
@@ -601,7 +601,7 @@ async function handleRemote(name, args) {
         metadata: { page_title: parsed.pageTitle, source: parsed.source, license, ...parsed.infobox },
       }));
       const result = await apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks/bulk`, {
-        chunks: chunkData, session: s,
+        chunks: chunkData, session: s, source: 'mcp',
       });
       return { ...result, pageTitle: parsed.pageTitle, chunksCreated: chunks.length, infoboxFields: Object.keys(parsed.infobox) };
     }
@@ -617,7 +617,7 @@ async function handleRemote(name, args) {
             metadata: { page_title: parsed.pageTitle, source: parsed.source, license, ...parsed.infobox },
           }));
           const r = await apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks/bulk`, {
-            chunks: chunkData, session: s,
+            chunks: chunkData, session: s, source: 'mcp',
           });
           results.push({ url: entry.url, chunk_id: entry.chunk_id, chunks: chunks.length, added: r.added, errors: r.errors });
         } catch (err) {
@@ -628,11 +628,11 @@ async function handleRemote(name, args) {
     }
     case "bulk_update_metadata":
       return apiCall('POST', `/api/projects/${p(args.project)}/bulk-metadata`, {
-        field: args.field, value: args.value, category: args.category, session: s,
+        field: args.field, value: args.value, category: args.category, session: s, source: 'mcp',
       });
     case "merge_projects":
       return apiCall('POST', `/api/projects/${p(args.source)}/merge`, {
-        target: args.target, session: s,
+        target: args.target, session: s, source: 'mcp',
       });
     case "export_category":
       return apiCall('GET', `/api/projects/${p(args.project)}/categories/${p(args.category)}/export`);
