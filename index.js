@@ -10,7 +10,7 @@ import * as cheerio from "cheerio";
 const store = new Store(process.env.DATA_DIR);
 
 const server = new Server(
-  { name: "tryll-dataset-builder", version: "1.2.0" },
+  { name: "tryll-dataset-builder", version: "1.3.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -483,6 +483,43 @@ const TOOLS = [
       required: ["project", "category"],
     },
   },
+
+  // ---- History ----
+  {
+    name: "get_history",
+    description: "Get version history (last 50 commits) for a project. Each commit shows who made the change (browser/MCP), what was changed, and when. Returns lightweight list without snapshots.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name" },
+      },
+      required: ["project"],
+    },
+  },
+  {
+    name: "get_commit",
+    description: "Get a specific commit with full snapshot data. Returns the commit's snapshot and the previous commit's snapshot for computing diffs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name" },
+        commit_id: { type: "string", description: "Commit UUID" },
+      },
+      required: ["project", "commit_id"],
+    },
+  },
+  {
+    name: "rollback",
+    description: "Rollback a project to a specific commit's state. Restores the project data from that commit's snapshot and creates a new 'rollback' commit in history. Safe: you can undo a rollback by rolling back to a later commit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name" },
+        commit_id: { type: "string", description: "Commit UUID to rollback to" },
+      },
+      required: ["project", "commit_id"],
+    },
+  },
 ];
 
 // ============================================
@@ -636,6 +673,14 @@ async function handleRemote(name, args) {
       });
     case "export_category":
       return apiCall('GET', `/api/projects/${p(args.project)}/categories/${p(args.category)}/export`);
+    case "get_history":
+      return apiCall('GET', `/api/projects/${p(args.project)}/history`);
+    case "get_commit":
+      return apiCall('GET', `/api/projects/${p(args.project)}/history/${args.commit_id}`);
+    case "rollback":
+      return apiCall('POST', `/api/projects/${p(args.project)}/history/${args.commit_id}/rollback`, {
+        session: s, source: 'mcp',
+      });
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -866,6 +911,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           break;
         }
 
+        case "get_history":
+          result = store.getHistory(args.project);
+          break;
+
+        case "get_commit":
+          result = store.getCommit(args.project, args.commit_id);
+          break;
+
+        case "rollback":
+          result = store.rollback(args.project, args.commit_id, 'mcp');
+          break;
+
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -890,7 +947,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Tryll Dataset Builder MCP server running (v1.2.0)");
+  console.error("Tryll Dataset Builder MCP server running (v1.3.0)");
 }
 
 main().catch((err) => {
