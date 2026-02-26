@@ -4,19 +4,64 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Store } from "./lib/store.js";
+import WebSocket from "ws";
 
 const store = new Store(process.env.DATA_DIR);
 
 const server = new Server(
-  { name: "tryll-dataset-builder", version: "1.0.0" },
+  { name: "tryll-dataset-builder", version: "1.1.0" },
   { capabilities: { tools: {} } }
 );
+
+// ============================================
+// SESSION CONNECTION STATE
+// ============================================
+
+let sessionWs = null;    // WebSocket to the web app
+let sessionBase = null;  // e.g. "http://localhost:3000"
+let sessionCode = null;  // e.g. "4F8K2M"
+
+function isConnected() {
+  return sessionWs && sessionWs.readyState === WebSocket.OPEN;
+}
+
+async function apiCall(method, path, body) {
+  const url = `${sessionBase}${path}`;
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `API ${res.status}`);
+  return data;
+}
 
 // ============================================
 // TOOL DEFINITIONS
 // ============================================
 
 const TOOLS = [
+  // ---- Session ----
+  {
+    name: "connect_session",
+    description: "Connect to the Dataset Builder web app for real-time collaboration. After connecting, all operations will appear live in the browser. The user will give you a 6-character session code shown in the web app's topbar.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Web app URL, e.g. http://localhost:3000 or https://my-dataset-builder.com" },
+        code: { type: "string", description: "6-character session code shown in the web app's topbar" },
+      },
+      required: ["url", "code"],
+    },
+  },
+  {
+    name: "disconnect_session",
+    description: "Disconnect from the Dataset Builder web app. Operations will switch back to local file storage.",
+    inputSchema: { type: "object", properties: {} },
+  },
+
   // ---- Project ----
   {
     name: "create_project",
@@ -273,6 +318,112 @@ const TOOLS = [
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
 // ============================================
+// REMOTE API HANDLERS (when connected to web app)
+// ============================================
+
+async function handleRemote(name, args) {
+  const p = (n) => encodeURIComponent(n);
+  const s = sessionCode;
+
+  switch (name) {
+    case "create_project":
+      return apiCall('POST', '/api/projects', { name: args.name, session: s });
+    case "list_projects":
+      return apiCall('GET', '/api/projects');
+    case "delete_project":
+      return apiCall('DELETE', `/api/projects/${p(args.name)}?session=${s}`);
+    case "get_project_stats":
+      return apiCall('GET', `/api/projects/${p(args.name)}/stats`);
+    case "create_category":
+      return apiCall('POST', `/api/projects/${p(args.project)}/categories`, { name: args.name, session: s });
+    case "list_categories":
+      return apiCall('GET', `/api/projects/${p(args.project)}/categories`);
+    case "rename_category":
+      return apiCall('PUT', `/api/projects/${p(args.project)}/categories/${p(args.old_name)}`, { newName: args.new_name, session: s });
+    case "delete_category":
+      return apiCall('DELETE', `/api/projects/${p(args.project)}/categories/${p(args.name)}?session=${s}`);
+    case "add_chunk":
+      return apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks`, {
+        id: args.id, text: args.text, metadata: args.metadata, session: s,
+      });
+    case "bulk_add_chunks":
+      return apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks/bulk`, {
+        chunks: args.chunks, session: s,
+      });
+    case "get_chunk": {
+      const proj = await apiCall('GET', `/api/projects/${p(args.project)}`);
+      for (const cat of proj.categories) {
+        const ch = cat.chunks.find(c => c.id === args.id);
+        if (ch) return { ...ch, category: cat.name };
+      }
+      throw new Error(`Chunk "${args.id}" not found`);
+    }
+    case "update_chunk": {
+      const proj2 = await apiCall('GET', `/api/projects/${p(args.project)}`);
+      for (const cat of proj2.categories) {
+        const ch = cat.chunks.find(c => c.id === args.id);
+        if (ch) {
+          const body = { session: s };
+          if (args.new_id !== undefined) body.id = args.new_id;
+          if (args.text !== undefined) body.text = args.text;
+          const meta = {};
+          if (args.page_title !== undefined) meta.page_title = args.page_title;
+          if (args.source !== undefined) meta.source = args.source;
+          if (args.license !== undefined) meta.license = args.license;
+          if (Object.keys(meta).length) body.metadata = meta;
+          if (args.metadata) {
+            body.customFields = Object.entries(args.metadata).map(([key, value]) => ({ key, value: String(value ?? '') }));
+          }
+          return apiCall('PUT', `/api/projects/${p(args.project)}/categories/${cat.id}/chunks/${ch._uid}`, body);
+        }
+      }
+      throw new Error(`Chunk "${args.id}" not found`);
+    }
+    case "delete_chunk": {
+      const proj3 = await apiCall('GET', `/api/projects/${p(args.project)}`);
+      for (const cat of proj3.categories) {
+        const ch = cat.chunks.find(c => c.id === args.id);
+        if (ch) {
+          return apiCall('DELETE', `/api/projects/${p(args.project)}/categories/${cat.id}/chunks/${ch._uid}?session=${s}`);
+        }
+      }
+      throw new Error(`Chunk "${args.id}" not found`);
+    }
+    case "duplicate_chunk": {
+      const proj4 = await apiCall('GET', `/api/projects/${p(args.project)}`);
+      for (const cat of proj4.categories) {
+        const ch = cat.chunks.find(c => c.id === args.id);
+        if (ch) {
+          return apiCall('POST', `/api/projects/${p(args.project)}/categories/${cat.id}/chunks/${ch._uid}/duplicate`);
+        }
+      }
+      throw new Error(`Chunk "${args.id}" not found`);
+    }
+    case "move_chunk":
+      return apiCall('POST', `/api/projects/${p(args.project)}/chunks/${p(args.id)}/move`, {
+        targetCategory: args.target_category, session: s,
+      });
+    case "search_chunks":
+      return apiCall('GET', `/api/projects/${p(args.project)}/search?q=${encodeURIComponent(args.query)}`);
+    case "export_project":
+      return apiCall('GET', `/api/projects/${p(args.project)}/export`);
+    case "import_json": {
+      let jsonData = args.data;
+      if (!jsonData && args.json_path) {
+        const { readFileSync } = await import('fs');
+        jsonData = JSON.parse(readFileSync(args.json_path, 'utf-8'));
+      }
+      if (!jsonData) throw new Error('Provide either "json_path" or "data" parameter');
+      return apiCall('POST', `/api/projects/${p(args.project)}/import`, {
+        data: jsonData, category: args.category, session: s,
+      });
+    }
+    default:
+      throw new Error(`Unknown tool: ${name}`);
+  }
+}
+
+// ============================================
 // CALL TOOL
 // ============================================
 
@@ -282,100 +433,169 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
 
-    switch (name) {
-      // ---- Project ----
-      case "create_project":
-        result = store.createProject(args.name);
-        break;
-      case "list_projects":
-        result = store.listProjects();
-        break;
-      case "delete_project":
-        result = store.deleteProject(args.name);
-        break;
-      case "get_project_stats":
-        result = store.getStats(args.name);
-        break;
-
-      // ---- Category ----
-      case "create_category":
-        result = store.createCategory(args.project, args.name);
-        break;
-      case "list_categories":
-        result = store.listCategories(args.project);
-        break;
-      case "rename_category":
-        result = store.renameCategory(args.project, args.old_name, args.new_name);
-        break;
-      case "delete_category":
-        result = store.deleteCategory(args.project, args.name);
-        break;
-
-      // ---- Chunk ----
-      case "add_chunk":
-        result = store.addChunk(args.project, args.category, {
-          id: args.id,
-          text: args.text,
-          metadata: args.metadata,
-        });
-        break;
-      case "bulk_add_chunks":
-        result = store.bulkAddChunks(args.project, args.category, args.chunks);
-        break;
-      case "get_chunk":
-        result = store.getChunk(args.project, args.id);
-        break;
-      case "update_chunk":
-        result = store.updateChunk(args.project, args.id, {
-          newId: args.new_id,
-          text: args.text,
-          page_title: args.page_title,
-          source: args.source,
-          license: args.license,
-          metadata: args.metadata,
-        });
-        break;
-      case "delete_chunk":
-        result = store.deleteChunk(args.project, args.id);
-        break;
-      case "duplicate_chunk":
-        result = store.duplicateChunk(args.project, args.id);
-        break;
-      case "move_chunk":
-        result = store.moveChunk(args.project, args.id, args.target_category);
-        break;
-
-      // ---- Search & Export ----
-      case "search_chunks":
-        result = store.searchChunks(args.project, args.query);
-        break;
-
-      case "export_project": {
-        const exported = store.exportProject(args.project);
-        if (args.save_to_file) {
-          const outPath = store._filePath(args.project).replace('.json', '.export.json');
-          const { writeFileSync } = await import('fs');
-          writeFileSync(outPath, JSON.stringify(exported, null, 2), 'utf-8');
-          result = { exported: exported.length, savedTo: outPath };
-        } else {
-          result = { exported: exported.length, data: exported };
-        }
-        break;
+    // ---- Session tools ----
+    if (name === "connect_session") {
+      if (isConnected()) {
+        sessionWs.close();
+        sessionWs = null;
       }
 
-      case "import_json": {
-        let jsonData = args.data;
-        if (!jsonData && args.json_path) {
-          const { readFileSync } = await import('fs');
-          jsonData = JSON.parse(readFileSync(args.json_path, 'utf-8'));
-        }
-        if (!jsonData) throw new Error('Provide either "json_path" or "data" parameter');
-        result = store.importJSON(args.project, jsonData, args.category);
-        break;
-      }
+      const base = args.url.replace(/\/+$/, '');
+      const code = args.code.toUpperCase().trim();
 
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+      // Test the connection with a health check
+      const health = await fetch(`${base}/health`).then(r => r.json()).catch(() => null);
+      if (!health) throw new Error(`Cannot reach ${base}. Is the Dataset Builder server running?`);
+
+      // Open WebSocket
+      const wsProto = base.startsWith('https') ? 'wss' : 'ws';
+      const wsHost = base.replace(/^https?:\/\//, '');
+      const wsUrl = `${wsProto}://${wsHost}/ws?session=${code}&type=mcp`;
+
+      await new Promise((resolve, reject) => {
+        const ws = new WebSocket(wsUrl);
+        const timer = setTimeout(() => { ws.close(); reject(new Error('Connection timed out')); }, 5000);
+
+        ws.on('open', () => {
+          clearTimeout(timer);
+        });
+
+        ws.on('message', (raw) => {
+          try {
+            const msg = JSON.parse(raw.toString());
+            if (msg.event === 'connected') {
+              sessionWs = ws;
+              sessionBase = base;
+              sessionCode = code;
+              resolve();
+            } else if (msg.event === 'error') {
+              clearTimeout(timer);
+              ws.close();
+              reject(new Error(msg.data?.message || 'Connection rejected'));
+            }
+          } catch {}
+        });
+
+        ws.on('error', (err) => {
+          clearTimeout(timer);
+          reject(new Error(`WebSocket error: ${err.message}`));
+        });
+
+        ws.on('close', () => {
+          if (!sessionWs) {
+            clearTimeout(timer);
+            reject(new Error('Connection closed unexpectedly'));
+          }
+        });
+      });
+
+      // Handle unexpected disconnects
+      sessionWs.on('close', () => {
+        console.error('Disconnected from web app');
+        sessionWs = null;
+        sessionBase = null;
+        sessionCode = null;
+      });
+
+      result = { connected: true, session: code, server: base };
+
+    } else if (name === "disconnect_session") {
+      if (sessionWs) {
+        sessionWs.close();
+        sessionWs = null;
+        sessionBase = null;
+        sessionCode = null;
+      }
+      result = { disconnected: true };
+
+    } else if (isConnected()) {
+      // ---- Remote mode: proxy through web app API ----
+      result = await handleRemote(name, args);
+
+    } else {
+      // ---- Local mode: use local store ----
+      switch (name) {
+        case "create_project":
+          result = store.createProject(args.name);
+          break;
+        case "list_projects":
+          result = store.listProjects();
+          break;
+        case "delete_project":
+          result = store.deleteProject(args.name);
+          break;
+        case "get_project_stats":
+          result = store.getStats(args.name);
+          break;
+        case "create_category":
+          result = store.createCategory(args.project, args.name);
+          break;
+        case "list_categories":
+          result = store.listCategories(args.project);
+          break;
+        case "rename_category":
+          result = store.renameCategory(args.project, args.old_name, args.new_name);
+          break;
+        case "delete_category":
+          result = store.deleteCategory(args.project, args.name);
+          break;
+        case "add_chunk":
+          result = store.addChunk(args.project, args.category, {
+            id: args.id, text: args.text, metadata: args.metadata,
+          });
+          break;
+        case "bulk_add_chunks":
+          result = store.bulkAddChunks(args.project, args.category, args.chunks);
+          break;
+        case "get_chunk":
+          result = store.getChunk(args.project, args.id);
+          break;
+        case "update_chunk":
+          result = store.updateChunk(args.project, args.id, {
+            newId: args.new_id, text: args.text, page_title: args.page_title,
+            source: args.source, license: args.license, metadata: args.metadata,
+          });
+          break;
+        case "delete_chunk":
+          result = store.deleteChunk(args.project, args.id);
+          break;
+        case "duplicate_chunk":
+          result = store.duplicateChunk(args.project, args.id);
+          break;
+        case "move_chunk":
+          result = store.moveChunk(args.project, args.id, args.target_category);
+          break;
+        case "search_chunks":
+          result = store.searchChunks(args.project, args.query);
+          break;
+
+        case "export_project": {
+          const exported = store.exportProject(args.project);
+          if (args.save_to_file) {
+            const outPath = store._filePath(args.project).replace('.json', '.export.json');
+            const { writeFileSync } = await import('fs');
+            writeFileSync(outPath, JSON.stringify(exported, null, 2), 'utf-8');
+            result = { exported: exported.length, savedTo: outPath };
+          } else {
+            result = { exported: exported.length, data: exported };
+          }
+          break;
+        }
+
+        case "import_json": {
+          let jsonData = args.data;
+          if (!jsonData && args.json_path) {
+            const { readFileSync } = await import('fs');
+            jsonData = JSON.parse(readFileSync(args.json_path, 'utf-8'));
+          }
+          if (!jsonData) throw new Error('Provide either "json_path" or "data" parameter');
+          result = store.importJSON(args.project, jsonData, args.category);
+          break;
+        }
+
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
     }
 
     return {
@@ -397,7 +617,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Tryll Dataset Builder MCP server running");
+  console.error("Tryll Dataset Builder MCP server running (v1.1.0)");
 }
 
 main().catch((err) => {
