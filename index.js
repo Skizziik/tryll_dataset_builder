@@ -5,11 +5,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Store } from "./lib/store.js";
 import WebSocket from "ws";
+import * as cheerio from "cheerio";
 
 const store = new Store(process.env.DATA_DIR);
 
 const server = new Server(
-  { name: "tryll-dataset-builder", version: "1.1.0" },
+  { name: "tryll-dataset-builder", version: "1.2.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -36,6 +37,96 @@ async function apiCall(method, path, body) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || `API ${res.status}`);
   return data;
+}
+
+// ============================================
+// URL PARSING HELPERS
+// ============================================
+
+const CHUNK_LIMIT = 2000;
+
+async function parseUrl(url) {
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TryllDatasetBuilder/1.2)' },
+  });
+  if (!res.ok) throw new Error(`Failed to fetch ${url}: HTTP ${res.status}`);
+  const html = await res.text();
+  const $ = cheerio.load(html);
+
+  // Extract page title
+  const pageTitle = $('title').first().text().trim()
+    || $('h1').first().text().trim()
+    || '';
+
+  // Extract wiki infobox metadata
+  const infobox = {};
+  $('.infobox tr, .sidebar tr, .wikitable.infobox tr, table.infobox tr').each((_, row) => {
+    const $row = $(row);
+    const key = $row.find('th').first().text().trim().replace(/\s+/g, ' ');
+    const val = $row.find('td').first().text().trim().replace(/\s+/g, ' ');
+    if (key && val && key.length < 60 && val.length < 200) {
+      infobox[key] = val;
+    }
+  });
+
+  // Remove noise elements
+  $('script, style, nav, footer, header, .sidebar, .infobox, .navbox, .mw-editsection, .reference, .reflist, #mw-navigation, .noprint, .toc').remove();
+
+  // Extract main text
+  const mainContent = $('article, main, #mw-content-text, #content, .mw-parser-output, #bodyContent, .entry-content, .post-content').first();
+  let text = '';
+  if (mainContent.length) {
+    text = mainContent.text();
+  } else {
+    text = $('body').text();
+  }
+
+  // Clean up whitespace
+  text = text
+    .replace(/\t/g, ' ')
+    .replace(/[ ]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return { text, pageTitle, infobox, source: url };
+}
+
+function splitTextIntoChunks(text, baseId, limit = CHUNK_LIMIT) {
+  if (text.length <= limit) {
+    return [{ id: baseId, text }];
+  }
+
+  const chunks = [];
+  let remaining = text;
+  let index = 1;
+
+  while (remaining.length > 0) {
+    let cutPoint = limit;
+    if (remaining.length > limit) {
+      // Try to cut at paragraph boundary
+      const paraBreak = remaining.lastIndexOf('\n\n', limit);
+      if (paraBreak > limit * 0.3) {
+        cutPoint = paraBreak;
+      } else {
+        // Try sentence boundary
+        const sentBreak = remaining.lastIndexOf('. ', limit);
+        if (sentBreak > limit * 0.3) {
+          cutPoint = sentBreak + 1;
+        }
+      }
+    } else {
+      cutPoint = remaining.length;
+    }
+
+    chunks.push({
+      id: `${baseId}_${index}`,
+      text: remaining.substring(0, cutPoint).trim(),
+    });
+    remaining = remaining.substring(cutPoint).trim();
+    index++;
+  }
+
+  return chunks;
 }
 
 // ============================================
@@ -309,6 +400,89 @@ const TOOLS = [
       required: ["project"],
     },
   },
+
+  // ---- URL Parsing ----
+  {
+    name: "parse_url",
+    description: "Fetch a web page, extract its text content, and auto-create chunks. If text exceeds 2000 characters, it auto-splits into multiple chunks with _1, _2 suffixes. Extracts page title and source URL as metadata. For wiki pages, extracts infobox/sidebar data as custom metadata fields.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name" },
+        category: { type: "string", description: "Category to add chunks into" },
+        url: { type: "string", description: "URL to fetch and parse" },
+        chunk_id: { type: "string", description: "Base chunk ID. If text is split, becomes chunk_id_1, chunk_id_2, etc." },
+        license: { type: "string", description: "License for the content. Default: CC BY-NC-SA 3.0" },
+      },
+      required: ["project", "category", "url", "chunk_id"],
+    },
+  },
+  {
+    name: "batch_parse_urls",
+    description: "Parse multiple URLs at once and add all chunks to a category. Each URL gets its own chunk ID prefix. Auto-splits long texts into multiple chunks.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name" },
+        category: { type: "string", description: "Category to add chunks into" },
+        urls: {
+          type: "array",
+          description: "Array of URL entries to parse",
+          items: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "URL to fetch" },
+              chunk_id: { type: "string", description: "Base chunk ID for this URL" },
+            },
+            required: ["url", "chunk_id"],
+          },
+        },
+        license: { type: "string", description: "License for all content. Default: CC BY-NC-SA 3.0" },
+      },
+      required: ["project", "category", "urls"],
+    },
+  },
+
+  // ---- Bulk Operations ----
+  {
+    name: "bulk_update_metadata",
+    description: "Update a metadata field across ALL chunks in a project (or a specific category). Useful for setting license, source, or custom fields in bulk.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name" },
+        field: { type: "string", description: "Metadata field to update (e.g. 'license', 'source', or any custom field name)" },
+        value: { type: "string", description: "New value for the field" },
+        category: { type: "string", description: "Optional: only update chunks in this category. If omitted, updates all chunks in the project." },
+      },
+      required: ["project", "field", "value"],
+    },
+  },
+  {
+    name: "merge_projects",
+    description: "Merge all categories and chunks from a source project into a target project. Categories with the same name are combined. Chunks with duplicate IDs are skipped.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", description: "Source project name (data is copied FROM here)" },
+        target: { type: "string", description: "Target project name (data is merged INTO here)" },
+      },
+      required: ["source", "target"],
+    },
+  },
+  {
+    name: "export_category",
+    description: "Export a single category as a flat JSON array. Same format as export_project but filtered to one category.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Project name" },
+        category: { type: "string", description: "Category name to export" },
+        save_to_file: { type: "boolean", description: "If true, saves to a file. Default: false." },
+      },
+      required: ["project", "category"],
+    },
+  },
 ];
 
 // ============================================
@@ -418,6 +592,50 @@ async function handleRemote(name, args) {
         data: jsonData, category: args.category, session: s,
       });
     }
+    case "parse_url": {
+      const parsed = await parseUrl(args.url);
+      const chunks = splitTextIntoChunks(parsed.text, args.chunk_id);
+      const license = args.license || 'CC BY-NC-SA 3.0';
+      const chunkData = chunks.map(ch => ({
+        id: ch.id, text: ch.text,
+        metadata: { page_title: parsed.pageTitle, source: parsed.source, license, ...parsed.infobox },
+      }));
+      const result = await apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks/bulk`, {
+        chunks: chunkData, session: s,
+      });
+      return { ...result, pageTitle: parsed.pageTitle, chunksCreated: chunks.length, infoboxFields: Object.keys(parsed.infobox) };
+    }
+    case "batch_parse_urls": {
+      const results = [];
+      const license = args.license || 'CC BY-NC-SA 3.0';
+      for (const entry of args.urls) {
+        try {
+          const parsed = await parseUrl(entry.url);
+          const chunks = splitTextIntoChunks(parsed.text, entry.chunk_id);
+          const chunkData = chunks.map(ch => ({
+            id: ch.id, text: ch.text,
+            metadata: { page_title: parsed.pageTitle, source: parsed.source, license, ...parsed.infobox },
+          }));
+          const r = await apiCall('POST', `/api/projects/${p(args.project)}/categories/${p(args.category)}/chunks/bulk`, {
+            chunks: chunkData, session: s,
+          });
+          results.push({ url: entry.url, chunk_id: entry.chunk_id, chunks: chunks.length, added: r.added, errors: r.errors });
+        } catch (err) {
+          results.push({ url: entry.url, chunk_id: entry.chunk_id, error: err.message });
+        }
+      }
+      return { parsed: results.filter(r => !r.error).length, failed: results.filter(r => r.error).length, results };
+    }
+    case "bulk_update_metadata":
+      return apiCall('POST', `/api/projects/${p(args.project)}/bulk-metadata`, {
+        field: args.field, value: args.value, category: args.category, session: s,
+      });
+    case "merge_projects":
+      return apiCall('POST', `/api/projects/${p(args.source)}/merge`, {
+        target: args.target, session: s,
+      });
+    case "export_category":
+      return apiCall('GET', `/api/projects/${p(args.project)}/categories/${p(args.category)}/export`);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -593,6 +811,61 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           break;
         }
 
+        case "parse_url": {
+          const parsed = await parseUrl(args.url);
+          const chunks = splitTextIntoChunks(parsed.text, args.chunk_id);
+          const license = args.license || 'CC BY-NC-SA 3.0';
+          const chunkData = chunks.map(ch => ({
+            id: ch.id, text: ch.text,
+            metadata: { page_title: parsed.pageTitle, source: parsed.source, license, ...parsed.infobox },
+          }));
+          const bulkResult = store.bulkAddChunks(args.project, args.category, chunkData);
+          result = { ...bulkResult, pageTitle: parsed.pageTitle, chunksCreated: chunks.length, infoboxFields: Object.keys(parsed.infobox) };
+          break;
+        }
+
+        case "batch_parse_urls": {
+          const results = [];
+          const license = args.license || 'CC BY-NC-SA 3.0';
+          for (const entry of args.urls) {
+            try {
+              const parsed = await parseUrl(entry.url);
+              const chunks = splitTextIntoChunks(parsed.text, entry.chunk_id);
+              const chunkData = chunks.map(ch => ({
+                id: ch.id, text: ch.text,
+                metadata: { page_title: parsed.pageTitle, source: parsed.source, license, ...parsed.infobox },
+              }));
+              const r = store.bulkAddChunks(args.project, args.category, chunkData);
+              results.push({ url: entry.url, chunk_id: entry.chunk_id, chunks: chunks.length, added: r.added, errors: r.errors });
+            } catch (err) {
+              results.push({ url: entry.url, chunk_id: entry.chunk_id, error: err.message });
+            }
+          }
+          result = { parsed: results.filter(r => !r.error).length, failed: results.filter(r => r.error).length, results };
+          break;
+        }
+
+        case "bulk_update_metadata":
+          result = store.bulkUpdateMetadata(args.project, args.field, args.value, args.category);
+          break;
+
+        case "merge_projects":
+          result = store.mergeProjects(args.source, args.target);
+          break;
+
+        case "export_category": {
+          const exported = store.exportCategory(args.project, args.category);
+          if (args.save_to_file) {
+            const outPath = store._filePath(args.project).replace('.json', `.${args.category}.export.json`);
+            const { writeFileSync } = await import('fs');
+            writeFileSync(outPath, JSON.stringify(exported, null, 2), 'utf-8');
+            result = { exported: exported.length, savedTo: outPath };
+          } else {
+            result = { exported: exported.length, data: exported };
+          }
+          break;
+        }
+
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -617,7 +890,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Tryll Dataset Builder MCP server running (v1.1.0)");
+  console.error("Tryll Dataset Builder MCP server running (v1.2.0)");
 }
 
 main().catch((err) => {
